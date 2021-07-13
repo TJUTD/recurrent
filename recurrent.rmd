@@ -1,0 +1,72 @@
+---
+title: "recurrent"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## simulation of Wang, Qin, Chiang (2001)
+
+covariate $X_i \sim Bernoulli(0.5)$
+
+frailty $Z_i = \exp(-X_i\log(2.75))Z_i^*$ with $Z_i^*|X_i \sim f(z|x_i) = (1-x_i)I(z^* \in [0.5,1.5]) + \frac{x_i}{2.5}I(z^* \in [1.5,4])$
+
+intensity function $z_i\lambda_0(t)\exp(x_i\beta)$, $t\in[0,10]$. marginal rate function $\lambda(t|x_i)=E[Z\lambda_0(t)\exp(X_i\beta)|X_i=x_i]=\lambda_0(t)\exp(x_i\beta)$ with $\lambda_0(t)=0.6+\frac{(t-6)^3}{360}$. $beta_0=\int_0^{10}\lambda_0(t)dt=5.277778$.
+
+censoring time $Y_i|(X_i,Z_i)\sim$ truncated exponential distribution Exp(rate=$z_i/10$,$y\in[1,10]$).
+
+```{r sim}
+nsim <- 500
+nproc <- 10 #400
+
+# X ~ Bernoulli(0.5)
+x <- rbinom(nproc,1,0.5)
+# f(z*|x)=(1-x)*I(z* in [0.5,1.5]) + x/2.5*I(z* in [1.5,4])
+zstar <- (1-x)*runif(nproc, min = 0.5, max = 1.5) + 
+  x*runif(nproc, min = 1.5, max = 4)
+z <- exp(-x*log(2.75))*zstar
+# mean(z)
+
+# t in [0,10]
+Tlim <- 10
+# lam0 <- 0.6 + (t-6)^3/360
+# beta <- 1
+# lam <- lam0 * exp(x*beta)
+
+# Y ~ truncated Exp(z/10) on [1,10]
+# inverse cdf
+itexp <- function(u, rate, ulim, llim) { 
+  -log(exp(-rate*llim)-u*(exp(-rate*llim)-exp(-rate*ulim)))/rate 
+}
+rtexp <- function(n, rate, ulim, llim) { itexp(runif(n), rate, ulim, llim) }
+y <- rtexp(nproc, rate = 0.1*z, ulim = 1, llim = 10)
+# hist(y)
+
+
+recdat <- data.frame()
+for (i in 1:nproc) {
+  v <- min(y[i], Tlim)
+  status <- 1 * (v == y[i])
+  tij <- NULL
+  m <- -1
+  while (sum(tij) < y[i]) {
+    # event time of Poisson process of rate 1
+    tLam <- rexp(1)
+    # Lam0(t) = 0.6*t + (t-6)^4/4/360 = Lam(t)/Z/exp(X)
+    rt <- polyroot(c(0.9-tLam/z[i]/exp(x[i]), 0, 3/20, -1/60, 1/1440))
+    if (sum(Im(rt)==0 & Re(rt) > 0)>0) {
+      tij <- c(tij, Re(rt[Im(rt)==0 & Re(rt) > 0])[1])
+      m <- m + 1
+    }
+  }
+  if (m == 0) {
+    dat <- data.frame(id = i, Time = y[i], status = 1, Z = z[i], X = x[i])
+  } else {
+    dat <- data.frame(id = i, Time = c(tij[1:m],y[i]), status = c(rep(0,m),1), Z = z[i], X = x[i])
+  }
+  recdat <- rbind(recdat, dat)
+}
+recdat
+```
