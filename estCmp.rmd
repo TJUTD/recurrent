@@ -1,0 +1,148 @@
+---
+title: "recurrent 08/12/21"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r code, eval = T, echo = F}
+# replicate Wang,Qin,Chiang (2001)
+library(BB)
+
+#' The following implements the scenario (b) in Wang et al. 2001, lam0 <- 0.6 + (t-6)^3/360 
+l0 <- function(t, x) exp(x) * (.6 + (t - 6) ^ 3 / 360)
+
+#' Function to generate data from Wang et al. 2001
+#'
+#' The output is a data.frame with the following variables
+#' id = subject's id
+#' Time = recurrent event time or censoring time
+#' event = recurrent event indicator; 1 if Time is a recurrent event time
+#' X = covariate, X ~ Bernoulli(0.5)
+#' frailty Z = exp(-X log(2.75))Z0, Z0 ~ (1-x) U(0.5,1.5) + x U(1.5,4)
+#' censoring time Y ~ truncated Exp(z/10) on [1,10]
+#' l0(10) = 7/9
+
+simDat <- function(n) {
+  x <- sample(0:1, n, TRUE)
+  z0 <- ifelse(x == 1, runif(n, 1.5, 4), runif(n, .5, 1.5))
+  z <- z0 * 2.75^-x
+  m <- exp(1) * 7 / 9
+  y <- qexp(runif(n, pexp(1, .1 * z), pexp(10, .1 * z)), .1 * z)
+  df <- do.call(rbind, sapply(1:n, 
+                              function(s) {
+                                t0 <- runif(rpois(1, 10 * m), 0, 10)
+                                mi <- length(t0)
+                                Ti <- sort(t0[runif(mi) <= l0(t0, x[s]) / m])
+                                Ti <- Ti[Ti <= y[s]]    
+                                data.frame(id = s, Time = c(Ti, y[s]), 
+                                           event = rep(1:0, c(length(Ti), 1)), X = x[s])
+                              }, simplify = FALSE))
+}
+
+est1 <- function(dat) {
+  # n <- length(unique(dat$id))
+  n <- sum(dat$event == 0)
+  tij <- dat$Time[dat$event > 0]
+  sl <- sort(unique(tij))
+  mi <- aggregate(event ~ id, dat, sum)$event
+  yi <- dat$Time[dat$event == 0]  
+  # F0 <- sapply(sl, function(x) 1 - sum(x == tij) / sum(tij <= x & x <= rep(yi, mi)))
+  yis <- rep(yi, mi)
+  F0 <- sapply(sl, function(x) 1 - sum(x == tij) / sum(tij <= x & x <= yis))
+  Ft <- rev(cumprod(rev(F0))) ## F(t) @ sl
+  Xi <- cbind(1, dat$X[dat$event == 0])
+  # out <- dfsane(par = rep(0, ncol(Xi)), fn = function(b)
+  #   drop(t(Xi) %*% (mi / Ft[findInterval(yi, sl)] - exp(Xi %*% b))) / n,
+  #   quiet = TRUE)
+  out <- dfsane(par = rep(0, ncol(Xi)), 
+                fn = function(b)
+                  drop(t(Xi) %*% (mi / Ft[findInterval(yi, sl)] - exp(Xi %*% b))),
+                quiet = TRUE)
+  out$par ## gives (log(\beta_0), \beta^\top)
+}
+```
+
+alternative estimator 
+```{r Lambda}
+estalter2 <- function(dat, ctrun = 1) {
+  
+  # event time
+  tij <- dat$Time[dat$event > 0]
+  # unique event time
+  sl <- sort(unique(tij))
+  # number of events 
+  mi <- aggregate(event ~ id, dat, sum)$event
+  # censoring time
+  yi <- dat$Time[dat$event == 0]  
+  # F0 <- sapply(sl, function(x) 1 - sum(x == tij) / sum(tij <= x & x <= rep(yi, mi)))
+  yis <- rep(yi, mi)
+  F0 <- sapply(sl, function(x) 1 - sum(x == tij) / sum(tij <= x & x <= yis))
+  # event time cdf
+  Ft <- rev(cumprod(rev(F0))) ## F(t) @ sl
+  if (ctrun < 0) {
+    Ft[1] <- Inf
+  } else if (ctrun == 0) {
+    Ft[1] <- Ft[2]
+  } else {
+    # total number of events
+    nevent <- sum(mi)
+    Ft[Ft < ctrun/log(nevent)] <- ctrun/log(nevent)
+  }  
+  
+  dat$yi <- rep(yi, mi+1)
+  dat$Ni[dat$event > 0] <- as.vector(unlist(sapply(mi[mi>0], function(x) 1:x))) 
+  dat$Ni[dat$event == 0] <- mi
+  
+  idTime <- 1:nrow(dat)
+  sumeq <- apply(sapply(tij, 
+                        function(t_) {
+                          idx <- tapply(idTime[t_ <= dat$yi & t_ >= dat$Time], 
+                                        dat$id[t_ <= dat$yi & t_ >= dat$Time], 
+                                        tail,1)
+                          NiFt <- dat$Ni[idx] / Ft[findInterval(t_, sl)]
+                          NiFtX <- dat$Ni[idx] * dat$X[idx] / Ft[findInterval(t_, sl)]
+                          c(sum(NiFt),sum(NiFtX))}), 1, sum)
+  
+  neqn <- sapply(yi, function(y_) sum(tij <= y_))
+  
+  #FtR[FtR == Inf] <- 0
+  # Xi <- cbind(1, dat$X[dat$event == 0])
+  out <- dfsane(par = c(0,0), 
+                fn = function(b){
+                  eq1 <- sumeq[1] - sum(neqn * exp(b[1] + dat$X[dat$event == 0] * b[2]))
+                  eq2 <- sumeq[2] - sum(neqn * exp(b[1] + dat$X[dat$event == 0] * b[2]) 
+                                        * dat$X[dat$event == 0])
+                  c(eq1,eq2)},
+                quiet = TRUE)
+  out$par ## gives (log(\beta_0), \beta^\top)
+}
+```
+
+
+- est1: (8) in paper
+- estalter2 with ctrun = -1: set the reciprocal of smallest value of cdf equals to 0 
+- estalter2 with ctrun =  0: set the reciprocal of smallest value of cdf equals to the second smallest one
+- estalter2 with ctrun =  1: adaptive truncation
+```{r n400}
+nrep <- 500
+res <- matrix(0, nrow = nrep, ncol = 8)
+set.seed(1)
+for (i in 1:nrep) {
+  dat <- simDat(400)
+  res[i,1:2] <- est1(dat)
+  res[i,3:4] <- estalter2(dat, ctrun = -1)
+  res[i,5:6] <- estalter2(dat, ctrun = 0)
+  res[i,7:8] <- estalter2(dat, ctrun = 1)
+}
+resBeta <- res
+resBeta[,c(1,3,5,7)] <- exp(res[,c(1,3,5,7)])
+colnames(resBeta) <- c("b0","b1","b0.a.0","b1.a.0","b0.a.2","b1.a.2","b0.a.t","b1.a.t")
+summary(resBeta)
+print("mean")
+apply(resBeta, 2, mean)
+print("sd")
+apply(resBeta, 2, sd)
+```
